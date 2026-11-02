@@ -150,3 +150,111 @@ for jogo in jogos:
                 st.caption("Frequências não são probabilidades previstas; médias não garantem gols nem lucro. Compare odds antes de decidir.")
             except Exception as erro:
                 st.error(str(erro))
+# === RADAR: ANALISAR TODOS OS JOGOS ===
+st.divider()
+st.subheader("📊 Radar automático do dia")
+st.caption("Uma consulta por campeonato, economizando chamadas da API.")
+
+if jogos and st.button("🔎 Analisar todos os jogos", type="primary"):
+    grupos = {}
+    for j in jogos:
+        identificador = (j["competition"]["id"], j["season"]["startDate"][:4])
+        grupos.setdefault(identificador, []).append(j)
+
+    if len(grupos) > 8:
+        st.warning("Há mais de 8 campeonatos. Escolha um campeonato no filtro.")
+    elif not chave.strip():
+        st.warning("Informe seu token para analisar.")
+    else:
+        resultados, avisos = [], []
+        with st.spinner("Analisando os campeonatos..."):
+            for (liga_id, temporada), grupo in grupos.items():
+                try:
+                    resposta = consultar(
+                        f"/competitions/{liga_id}/matches",
+                        chave.strip(),
+                        (("season", temporada), ("status", "FINISHED")),
+                    )
+                    partidas = resposta.get("matches", [])
+                    for j in grupo:
+                        a = historico(partidas, j["homeTeam"]["id"], "casa", liga_id, instante(j))
+                        b = historico(partidas, j["awayTeam"]["id"], "fora", liga_id, instante(j))
+                        if not a or not b:
+                            avisos.append(j["homeTeam"]["name"] + " x " + j["awayTeam"]["name"] + ": sem histórico suficiente")
+                            continue
+
+                        am = sum(x[1] for x in a) / len(a)
+                        asf = sum(x[2] for x in a) / len(a)
+                        bm = sum(x[1] for x in b) / len(b)
+                        bsf = sum(x[2] for x in b) / len(b)
+
+                        ec = (am + bsf) / 2
+                        ef = (bm + asf) / 2
+                        total = ec + ef
+                        historicos = a + b
+
+                        o15 = frequencia(historicos, lambda g, s: g + s >= 2)
+                        o25 = frequencia(historicos, lambda g, s: g + s >= 3)
+                        ambas = frequencia(historicos, lambda g, s: g > 0 and s > 0)
+                        u25 = 100 - o25
+
+                        mercados = []
+                        if o15 >= 75 and total >= 2.1:
+                            mercados.append("Over 1,5")
+                        if o25 >= 58 and total >= 2.5:
+                            mercados.append("Over 2,5")
+                        if ambas >= 60 and min(ec, ef) >= 0.9:
+                            mercados.append("Ambas marcam")
+                        if u25 >= 65 and total < 2.5:
+                            mercados.append("Under 2,5")
+
+                        resultados.append({
+                            "jogo": j, "am": am, "asf": asf,
+                            "bm": bm, "bsf": bsf, "ec": ec, "ef": ef,
+                            "total": total, "o15": o15, "o25": o25,
+                            "ambas": ambas, "u25": u25,
+                            "na": len(a), "nb": len(b),
+                            "mercados": mercados,
+                        })
+                except Exception as erro:
+                    avisos.append("Campeonato " + str(liga_id) + ": " + str(erro))
+
+        st.session_state["radar_resultados"] = sorted(
+            resultados, key=lambda x: x["total"], reverse=True
+        )
+        st.session_state["radar_avisos"] = avisos
+        st.session_state["radar_contexto"] = (dia.isoformat(), escolhido)
+
+if st.session_state.get("radar_contexto") == (dia.isoformat(), escolhido):
+    resultados = st.session_state.get("radar_resultados", [])
+    if resultados:
+        tabela = []
+        for r in resultados:
+            j = r["jogo"]
+            curta = min(r["na"], r["nb"]) < 5
+            tabela.append({
+                "Jogo": j["homeTeam"]["name"] + " x " + j["awayTeam"]["name"],
+                "Média": round(r["total"], 2),
+                "Mercados": ", ".join(r["mercados"]) or "Sem sinal",
+                "Amostra": f"{r['na']} casa / {r['nb']} fora",
+                "Atenção": "Poucos jogos" if curta else "OK",
+            })
+
+        st.dataframe(tabela, hide_index=True, use_container_width=True)
+        st.caption("Ordenado pela média estimada, não pela chance de lucro.")
+
+        for r in resultados:
+            j = r["jogo"]
+            with st.expander(j["homeTeam"]["name"] + " x " + j["awayTeam"]["name"] + " — detalhes"):
+                st.write(f"Mandante: ({r['am']:.2f} + {r['bsf']:.2f}) ÷ 2 = **{r['ec']:.2f}**")
+                st.write(f"Visitante: ({r['bm']:.2f} + {r['asf']:.2f}) ÷ 2 = **{r['ef']:.2f}**")
+                st.metric("Total combinado", f"{r['total']:.2f} gols")
+                st.write(f"Over 1,5: {r['o15']:.0f}% | Over 2,5: {r['o25']:.0f}%")
+                st.write(f"Under 2,5: {r['u25']:.0f}% | Ambas: {r['ambas']:.0f}%")
+                if min(r["na"], r["nb"]) < 5:
+                    st.warning("Amostra pequena: não classificar como entrada forte.")
+
+    if st.session_state.get("radar_avisos"):
+        with st.expander("Jogos sem análise ou erros"):
+            for aviso in st.session_state["radar_avisos"]:
+                st.write("• " + aviso)
